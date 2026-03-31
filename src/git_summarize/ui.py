@@ -365,6 +365,99 @@ class UI:
             f"{provider} Error",
         )
 
+    def prompt_branch_selection(
+        self,
+        current_branch: str,
+        remote_branches: list[str],
+    ) -> Optional[str]:
+        """
+        Prompt user to select a branch to push to.
+
+        Args:
+            current_branch: Current local branch name
+            remote_branches: List of remote branch names
+
+        Returns:
+            Selected branch name, or None if cancelled
+        """
+        self.console.print()
+        self.console.print("[bold]Select branch to push to:[/bold]")
+        self.console.print()
+
+        # Build options table
+        table = Table(show_header=True, box=None, padding=(0, 1))
+        table.add_column("Option", style="cyan")
+        table.add_column("Branch", style="white")
+        table.add_column("Info", style="dim")
+
+        # Current branch (recommended)
+        table.add_row(
+            "[1]",
+            f"[green]{current_branch}[/green]",
+            "[dim](current branch - recommended)[/dim]",
+        )
+
+        # Other remote branches
+        other_branches = [b for b in remote_branches if b != current_branch]
+        for i, branch in enumerate(other_branches[:5], 2):  # Limit to 5
+            table.add_row(f"[{i}]", branch, "")
+
+        # New branch option
+        new_option = len(other_branches) + 2
+        table.add_row(f"[{new_option}]", "[yellow]<new branch>[/yellow]", "")
+
+        # Cancel
+        table.add_row(f"[q]", "[red]Cancel[/red]", "")
+
+        self.console.print(table)
+        self.console.print()
+
+        options = [str(i) for i in range(1, new_option + 1)] + ["q"]
+
+        while True:
+            choice = Prompt.ask(
+                "Enter choice",
+                choices=options,
+                default="1",
+                show_choices=False,
+            )
+
+            if choice == "q":
+                return None
+            elif choice == "1":
+                return current_branch
+            elif choice.isdigit() and 2 <= int(choice) <= len(other_branches) + 1:
+                return other_branches[int(choice) - 2]
+            elif choice == str(new_option):
+                # Create new branch
+                new_branch = Prompt.ask("[bold]Enter new branch name[/bold]")
+                if new_branch.strip():
+                    return new_branch.strip()
+                continue
+            else:
+                self.console.print("[red]Invalid choice. Please try again.[/red]")
+
+    def prompt_confirm_push(self, branch: str, set_upstream: bool) -> bool:
+        """
+        Confirm before pushing.
+
+        Args:
+            branch: Branch name to push to
+            set_upstream: Whether upstream will be set
+
+        Returns:
+            True if user confirms, False otherwise
+        """
+        self.console.print()
+        push_msg = f"Push to [cyan]{branch}[/cyan]"
+        if set_upstream:
+            push_msg += " [dim](set as upstream)[/dim]"
+
+        return Confirm.ask(
+            f"[bold]{push_msg}?[/bold]",
+            default=True,
+        )
+
     def clear(self) -> None:
         """Clear the console."""
         self.console.clear()

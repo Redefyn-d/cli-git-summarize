@@ -15,12 +15,14 @@ from rich.console import Console
 
 from git_summarize import __version__
 from git_summarize.config import Config, get_config
+from git_summarize.git_ops import GitOps
 from git_summarize.git_reader import GitReader, GitReaderError
 from git_summarize.prompt_builder import PromptBuilder
 from git_summarize.parser import ResponseParser
 from git_summarize.providers import (
     AIProvider,
     ClaudeProvider,
+    GeminiProvider,
     OllamaProvider,
     OpenAIProvider,
     ProviderError,
@@ -78,7 +80,7 @@ def generate(
         "--provider",
         "-p",
         callback=validate_provider,
-        help="AI provider to use (claude, openai, ollama)",
+        help="AI provider to use (claude, openai, ollama, gemini)",
     ),
     model: Optional[str] = typer.Option(
         None,
@@ -110,6 +112,16 @@ def generate(
         "--apply",
         help="Apply first suggestion directly",
     ),
+    push: bool = typer.Option(
+        False,
+        "--push",
+        help="Push after commit (asks for branch selection)",
+    ),
+    no_add: bool = typer.Option(
+        False,
+        "--no-add",
+        help="Skip git add (only stage specific files)",
+    ),
     repo_path: Optional[str] = typer.Option(
         None,
         "--repo",
@@ -139,6 +151,8 @@ def generate(
         config.preview = preview
     if apply:
         config.apply = apply
+    if push:
+        config.push = push
 
     # Initialize UI
     ui = UI(console)
@@ -278,7 +292,17 @@ async def run_generation_flow(
         Exit code (0 for success)
     """
     try:
-        # Step 1: Read Git context
+        # Initialize Git operations
+        git = GitOps(repo_path)
+
+        # Step 1: Stage changes if not skipped
+        if not config.no_add:
+            with ui.show_spinner("Staging changes..."):
+                if not git.stage_all():
+                    ui.show_error("Failed to stage changes.", "Git Error")
+                    return 1
+
+        # Step 2: Read Git context
         with ui.show_spinner("Reading Git repository..."):
             try:
                 reader = GitReader(repo_path)
@@ -300,13 +324,13 @@ async def run_generation_flow(
             deletions=context.deletions,
         )
 
-        # Step 2: Build prompt
+        # Step 3: Build prompt
         prompt_builder = PromptBuilder(
             num_suggestions=config.num_suggestions,
         )
         prompt = prompt_builder.build(context)
 
-        # Step 3: Get AI provider
+        # Step 4: Get AI provider
         provider_name = config.provider
         api_key = config.get_api_key(provider_name)
         model = config.get_model(provider_name)
@@ -319,7 +343,7 @@ async def run_generation_flow(
             ui.show_error(error, f"{provider.name} Error")
             return 1
 
-        # Step 4: Generate suggestions
+        # Step 5: Generate suggestions
         try:
             with ui.show_spinner(f"Generating commit messages with {provider.name}..."):
                 response = await provider.generate(
@@ -338,7 +362,7 @@ async def run_generation_flow(
             ui.show_provider_error(provider_name, str(e))
             return 1
 
-        # Step 5: Parse response
+        # Step 6: Parse response
         parser = ResponseParser()
         result = parser.parse(response.text)
 
@@ -354,14 +378,14 @@ async def run_generation_flow(
             for error in result.parse_errors:
                 ui.show_warning(error, "Parse Warning")
 
-        # Step 6: Display suggestions
+        # Step 7: Display suggestions
         ui.show_suggestions(
             suggestions=result.suggestions,
             provider=provider_name,
             model=model,
         )
 
-        # Step 7: Handle user interaction
+        # Step 8: Handle user interaction
         selected_message = await handle_user_interaction(
             ui=ui,
             suggestions=result.suggestions,
@@ -375,26 +399,33 @@ async def run_generation_flow(
             console.print("[yellow]Commit cancelled.[/yellow]")
             return 0
 
-        # Step 8: Commit
+        # Step 9: Commit
         if config.preview:
             ui.prompt_preview(selected_message)
             return 0
 
         if config.apply or config.auto:
-            success = commit_changes(selected_message)
+            success, commit_output = git.commit(selected_message)
         else:
             if ui.prompt_confirm_commit(selected_message):
-                success = commit_changes(selected_message)
+                success, commit_output = git.commit(selected_message)
             else:
                 console.print("[yellow]Commit cancelled.[/yellow]")
                 return 0
 
-        if success:
-            ui.show_commit_success(selected_message)
-            return 0
-        else:
-            ui.show_error("Failed to create commit. Check for errors above.", "Commit Error")
+        if not success:
+            ui.show_error(f"Failed to create commit: {commit_output}", "Commit Error")
             return 1
+
+        ui.show_commit_success(selected_message)
+
+        # Step 10: Push if requested
+        if config.push:
+            push_result = await handle_push(git, ui, context.branch_name)
+            if push_result != 0:
+                return push_result
+
+        return 0
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled.[/yellow]")
@@ -421,6 +452,8 @@ def create_provider(
             model=model,
             host=config.get_ollama_host(),
         )
+    elif provider_name == "gemini":
+        return GeminiProvider(api_key=api_key, model=model)
     else:
         raise ValueError(f"Unknown provider: {provider_name}")
 
@@ -496,6 +529,74 @@ async def handle_user_interaction(
 
     ui.show_error("Maximum iterations reached.", "Error")
     return None
+
+
+async def handle_push(git: GitOps, ui: UI, current_branch: str) -> int:
+    """
+    Handle push workflow with branch selection.
+
+    Args:
+        git: GitOps instance
+        ui: UI instance
+        current_branch: Current branch name
+
+    Returns:
+        Exit code (0 for success)
+    """
+    try:
+        # Check if repository has a remote
+        if not git.has_remote():
+            ui.show_error(
+                "No remote configured. Add a remote with:\n"
+                f"  git remote add origin <repository-url>",
+                "Push Error",
+            )
+            return 1
+
+        # Get remote branches
+        remote_branches = git.get_remote_branches()
+
+        # Select branch to push to
+        if remote_branches:
+            # Show branch selection UI
+            selected_branch = ui.prompt_branch_selection(
+                current_branch=current_branch,
+                remote_branches=remote_branches,
+            )
+
+            if selected_branch is None:
+                console.print("[yellow]Push cancelled.[/yellow]")
+                return 0
+
+            # Check if we need to set upstream
+            set_upstream = current_branch not in remote_branches
+        else:
+            # No remote branches, push to current branch with upstream
+            selected_branch = current_branch
+            set_upstream = True
+
+        # Confirm push
+        if not ui.prompt_confirm_push(selected_branch, set_upstream):
+            console.print("[yellow]Push cancelled.[/yellow]")
+            return 0
+
+        # Execute push
+        with ui.show_spinner(f"Pushing to {selected_branch}..."):
+            success, output = git.push(
+                branch=selected_branch,
+                set_upstream=set_upstream,
+            )
+
+        if not success:
+            ui.show_error(f"Push failed: {output}", "Push Error")
+            return 1
+
+        console.print(f"[green]✓[/green] Pushed to {selected_branch}")
+        return 0
+
+    except Exception as e:
+        ui.show_error(f"Push error: {str(e)}", "Error")
+        return 1
 
 
 def commit_changes(message: str) -> bool:

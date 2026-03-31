@@ -38,6 +38,12 @@ class OpenAISettings(ProviderSettings):
     model: str = "gpt-4-turbo-preview"
 
 
+class GeminiSettings(ProviderSettings):
+    """Gemini-specific settings."""
+
+    model: str = "gemini-1.5-flash"
+
+
 class Config(BaseSettings):
     """
     Main configuration for git-summarize.
@@ -56,7 +62,7 @@ class Config(BaseSettings):
     # AI Provider settings
     provider: str = Field(
         default="claude",
-        description="Default AI provider (claude, openai, ollama)",
+        description="Default AI provider (claude, openai, ollama, gemini)",
     )
     model: Optional[str] = Field(
         default=None,
@@ -77,6 +83,10 @@ class Config(BaseSettings):
     openai_api_key: Optional[str] = Field(
         default=None,
         description="OpenAI API key",
+    )
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Gemini API key",
     )
 
     # Ollama settings
@@ -102,18 +112,37 @@ class Config(BaseSettings):
         default=False,
         description="Apply first suggestion directly",
     )
+    push: bool = Field(
+        default=False,
+        description="Push after commit (with branch selection)",
+    )
 
     # Provider-specific configurations
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     claude: ClaudeSettings = Field(default_factory=ClaudeSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
+    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
 
     def get_api_key(self, provider: str) -> Optional[str]:
         """Get API key for specified provider."""
         if provider == "claude":
-            return self.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
+            return (
+                self.anthropic_api_key
+                or os.getenv("GCM_ANTHROPIC_API_KEY")
+                or os.getenv("ANTHROPIC_API_KEY")
+            )
         elif provider == "openai":
-            return self.openai_api_key or os.getenv("OPENAI_API_KEY")
+            return (
+                self.openai_api_key
+                or os.getenv("GCM_OPENAI_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+            )
+        elif provider == "gemini":
+            return (
+                self.gemini_api_key
+                or os.getenv("GCM_GEMINI_API_KEY")
+                or os.getenv("GEMINI_API_KEY")
+            )
         return None  # Ollama doesn't need a key
 
     def get_model(self, provider: str) -> str:
@@ -127,6 +156,8 @@ class Config(BaseSettings):
             return self.openai.model
         elif provider == "ollama":
             return self.ollama_model
+        elif provider == "gemini":
+            return self.gemini.model
 
         raise ValueError(f"Unknown provider: {provider}")
 
@@ -143,10 +174,17 @@ class Config(BaseSettings):
         """
         config_file = Path.home() / ".git-summarize" / "config.toml"
 
-        if config_file.exists():
-            return cls(_env_file=".env", _env_file_encoding="utf-8")
+        # Look for .env in current directory and package directory
+        env_file = Path(".env")
+        if not env_file.exists():
+            # Try package directory
+            package_dir = Path(__file__).parent.parent.parent
+            env_file = package_dir / ".env"
 
-        return cls(_env_file=".env", _env_file_encoding="utf-8")
+        if env_file.exists():
+            return cls(_env_file=str(env_file), _env_file_encoding="utf-8")
+
+        return cls()
 
 
 def get_config() -> Config:
