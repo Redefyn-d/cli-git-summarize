@@ -14,7 +14,10 @@
       "Bash(xcopy *)",
       "Bash(copy *)",
       "Bash(d *)",
-      "Bash(@rmdir *)"
+      "Bash(@rmdir *)",
+      "Bash(powershell *)",
+      "Bash(gcm *)",
+      "Bash(pytest)"
     ]
   },
   "$version": 3
