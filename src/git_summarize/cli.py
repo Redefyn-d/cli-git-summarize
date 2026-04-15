@@ -366,6 +366,12 @@ async def run_generation_flow(
 
         # Check for staged changes
         if not context.has_changes:
+            # Smart check: Are we already ahead of the remote? (e.g. previous push failed)
+            if git.is_ahead(context.branch_name):
+                console.print("\n[cyan]No new staged changes, but your branch is ahead of the remote.[/cyan]")
+                if typer.confirm("Would you like to try pushing your existing commits now?", default=True):
+                    return await handle_push(git, ui, context.branch_name)
+            
             ui.show_no_changes()
             return 1
 
@@ -676,6 +682,27 @@ async def handle_push(git: GitOps, ui: UI, current_branch: str) -> int:
             )
 
         if not success:
+            # Handle common push errors (like being behind the remote)
+            if "non-fast-forward" in output or "fetch first" in output:
+                console.print("\n[yellow]Your local branch is behind the remote. Pulling is required.[/yellow]")
+                if typer.confirm("Would you like me to pull changes and retry the push?", default=True):
+                    with ui.show_spinner("Pulling and rebasing..."):
+                        pull_success, pull_error = git.pull(rebase=True)
+                    
+                    if pull_success:
+                        console.print("[green]✓[/green] Successfully integrated remote changes. Retrying push...")
+                        # Mark success to True so the next call can proceed or let handle_push recursion do it
+                        success, output = git.push(branch=selected_branch, set_upstream=set_upstream)
+                        if success:
+                             console.print(f"[green]✓[/green] Pushed to {selected_branch}")
+                             return 0
+                        else:
+                             ui.show_error(f"Push retry failed: {output}", "Push Error")
+                             return 1
+                    else:
+                        ui.show_error(f"Pull failed: {pull_error}", "Pull Error")
+                        return 1
+
             ui.show_error(f"Push failed: {output}", "Push Error")
             return 1
 

@@ -235,6 +235,27 @@ class GitOps:
             error_msg = e.stderr or e.message
             return False, error_msg
 
+    def pull(self, rebase: bool = True) -> Tuple[bool, str]:
+        """
+        Pull changes from remote.
+
+        Args:
+            rebase: Whether to use rebase
+
+        Returns:
+            Tuple of (success, output/error message)
+        """
+        args = ["pull"]
+        if rebase:
+            args.append("--rebase")
+        
+        try:
+            result = self._run_git(args)
+            output = result.stdout.strip()
+            return True, output
+        except GitOpsError as e:
+            return False, e.stderr or e.message
+
     def is_ahead(self, branch: str) -> bool:
         """
         Check if local branch is ahead of remote.
